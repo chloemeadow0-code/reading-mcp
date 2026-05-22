@@ -100,4 +100,4 @@ Use `reading_search_chunks` for:
 
 ## Why This Works
 
-The EPUB/text import step makes long books stable and addressable. EPUB imports preserve spine item boundaries, so chunks keep chapter titles instead of becoming whole-book `Part X/N` slices. TXT imports can also preserve chapters when given a `--heading-regex`. The MCP server gives Claude small operations with memory: read a chunk, annotate a quote, mark progress, search earlier text. Together they turn long-form reading into a durable process instead of a single prompt.
+The EPUB/text import step makes long books stable and addressable. EPUB imports preserve spine item boundaries, so chunks keep chapter titles instead of becoming whole-book `Part X/N` slices. If an EPUB stores the whole book in one XHTML file, the importer falls back to internal `h1`/`h2`/`h3` headings. TXT imports can also preserve chapters when given a `--heading-regex`. The MCP server gives Claude small operations with memory: read a chunk, annotate a quote, mark progress, search earlier text. Together they turn long-form reading into a durable process instead of a single prompt.

@@ -114,4 +114,4 @@ The server keeps lightweight in-process caches:
 - chunk text is cached by file signature for repeated reads/searches
 - annotation counts are cached by `annotations.jsonl` signature
 
-Writes that change annotations clear the annotation cache immediately. Restarting the server clears all caches.
+Writes that change annotations clear the annotation cache immediately. Writes to annotations, progress, and session context are serialized through an in-process queue to avoid read-modify-write overlap in multi-client use. Restarting the server clears all caches.

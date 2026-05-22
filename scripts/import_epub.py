@@ -57,6 +57,22 @@ def text_from_html(raw: str) -> str:
     return raw.strip()
 
 
+def sections_from_html_headings(raw: str) -> list[dict[str, str]]:
+    matches = list(re.finditer(r"(?is)<h[1-3][^>]*>.*?</h[1-3]>", raw))
+    if len(matches) < 2:
+        return []
+
+    sections = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        title = strip_tags(match.group(0)) or f"Section {index + 1}"
+        text = text_from_html(raw[start:end])
+        if text:
+            sections.append({"title": title, "text": text})
+    return sections
+
+
 def find_opf_path(zf: zipfile.ZipFile) -> str | None:
     try:
         root = ET.fromstring(zf.read(CONTAINER))
@@ -193,6 +209,18 @@ def read_epub(path: Path) -> tuple[str | None, str | None, list[dict[str, str]]]
                 raw = zf.read(name).decode("utf-8", errors="ignore")
             except KeyError:
                 continue
+            if len(ordered) == 1:
+                internal_sections = sections_from_html_headings(raw)
+                if internal_sections:
+                    for section_index, section in enumerate(internal_sections):
+                        sections.append(
+                            {
+                                "title": section["title"],
+                                "text": section["text"],
+                                "sourcePath": f"{name}#heading-{section_index + 1}",
+                            }
+                        )
+                    continue
             text = text_from_html(raw)
             if text:
                 section_title = toc_titles.get(name) or title_from_html(raw) or f"Section {index + 1}"

@@ -20,7 +20,7 @@ Requirements:
 - Python 3.10+ for the import scripts
 
 ```bash
-cd reading-mcp
+cd co-reading-mcp
 cp -R data.example data
 node src/server.js
 ```
@@ -32,9 +32,9 @@ For Claude Desktop / Claude Code, configure the MCP server as a stdio command:
   "mcpServers": {
     "co-reading": {
       "command": "node",
-      "args": ["/absolute/path/to/reading-mcp/src/server.js"],
+      "args": ["/absolute/path/to/co-reading-mcp/src/server.js"],
       "env": {
-        "READING_MCP_DATA_DIR": "/absolute/path/to/reading-mcp/data"
+        "READING_MCP_DATA_DIR": "/absolute/path/to/co-reading-mcp/data"
       }
     }
   }
@@ -73,7 +73,7 @@ data/books/<book-id>/
     ch01.txt
 ```
 
-EPUB imports keep each spine item as a section boundary. If a chapter is longer than `--max-chars`, only that chapter is split into `Chapter Title Part 1/N`, `Part 2/N`, and so on.
+EPUB imports keep each spine item as a section boundary. If an EPUB stores the whole book in a single spine item, the importer falls back to internal `h1`/`h2`/`h3` headings. If a chapter is longer than `--max-chars`, only that chapter is split into `Chapter Title Part 1/N`, `Part 2/N`, and so on.
 
 Runtime state is stored outside book content:
 

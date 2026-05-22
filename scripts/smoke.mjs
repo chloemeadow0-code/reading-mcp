@@ -8,6 +8,7 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tempDataDir = await mkdtemp(path.join(os.tmpdir(), "co-reading-mcp-"));
 await cp(path.join(root, "data.example"), tempDataDir, { recursive: true });
 const tempEpub = path.join(tempDataDir, "spine-demo.epub");
+const singleItemEpub = path.join(tempDataDir, "single-item-demo.epub");
 execFileSync(
   "python3",
   ["-", tempEpub],
@@ -67,6 +68,50 @@ if (!importedManifest.chunks.some((chunk) => chunk.sectionTitle === "Chapter Two
 }
 if (importedManifest.chunks.some((chunk) => chunk.title.startsWith("Spine Demo Part"))) {
   throw new Error("EPUB import used whole-book Part titles instead of section titles");
+}
+execFileSync(
+  "python3",
+  ["-", singleItemEpub],
+  {
+    input: `
+import sys, zipfile
+epub = sys.argv[1]
+with zipfile.ZipFile(epub, "w") as zf:
+    zf.writestr("mimetype", "application/epub+zip")
+    zf.writestr("META-INF/container.xml", """<?xml version='1.0'?>
+<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'>
+  <rootfiles><rootfile full-path='OPS/content.opf' media-type='application/oebps-package+xml'/></rootfiles>
+</container>""")
+    zf.writestr("OPS/content.opf", """<?xml version='1.0'?>
+<package xmlns='http://www.idpf.org/2007/opf' version='3.0'>
+  <metadata xmlns:dc='http://purl.org/dc/elements/1.1/'><dc:title>Single Item Demo</dc:title></metadata>
+  <manifest><item id='all' href='all.xhtml' media-type='application/xhtml+xml'/></manifest>
+  <spine><itemref idref='all'/></spine>
+</package>""")
+    zf.writestr("OPS/all.xhtml", """<html xmlns='http://www.w3.org/1999/xhtml'><body>
+      <h1>Inner Chapter One</h1><p>The first internal chapter lives inside one XHTML spine item.</p>
+      <h1>Inner Chapter Two</h1><p>The second internal chapter should become its own section.</p>
+    </body></html>""")
+`,
+    encoding: "utf8",
+  },
+);
+execFileSync("python3", [
+  path.join(root, "scripts/import_epub.py"),
+  singleItemEpub,
+  "--out",
+  path.join(tempDataDir, "books"),
+  "--book-id",
+  "single-item-demo",
+]);
+const singleItemManifest = JSON.parse(
+  await readFile(path.join(tempDataDir, "books", "single-item-demo", "manifest.json"), "utf8"),
+);
+if (!singleItemManifest.chunks.some((chunk) => chunk.sectionTitle === "Inner Chapter One")) {
+  throw new Error("single-spine EPUB import did not split first internal heading");
+}
+if (!singleItemManifest.chunks.some((chunk) => chunk.sectionTitle === "Inner Chapter Two")) {
+  throw new Error("single-spine EPUB import did not split second internal heading");
 }
 const tempTxt = path.join(tempDataDir, "heading-demo.txt");
 await writeFile(
@@ -215,6 +260,10 @@ const badChunkPath = await request("tools/call", {
   name: "reading_read_chunk",
   arguments: { bookId: "bad-book", chunkId: "ch00" },
 });
+const badMarkRead = await request("tools/call", {
+  name: "reading_mark_read",
+  arguments: { bookId: "demo-book", chunkId: "missing-chunk" },
+});
 
 server.kill();
 await rm(tempDataDir, { recursive: true, force: true });
@@ -263,6 +312,9 @@ if (!badBookPath.error?.message.includes("Path escapes data directory")) {
 }
 if (!badChunkPath.error?.message.includes("Path escapes data directory")) {
   throw new Error("reading_read_chunk did not reject path traversal chunk path");
+}
+if (!badMarkRead.error?.message.includes("Unknown chunkId")) {
+  throw new Error("reading_mark_read did not reject an unknown chunkId");
 }
 
 console.log("smoke ok");

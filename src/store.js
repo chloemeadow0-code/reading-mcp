@@ -22,12 +22,19 @@ const annotationCache = {
   bookCounts: new Map(),
   chunkCounts: new Map(),
 };
+let writeQueue = Promise.resolve();
 
 function invalidateAnnotationCache() {
   annotationCache.signature = null;
   annotationCache.rows = [];
   annotationCache.bookCounts = new Map();
   annotationCache.chunkCounts = new Map();
+}
+
+async function withWriteLock(operation) {
+  const run = writeQueue.then(operation, operation);
+  writeQueue = run.catch(() => {});
+  return run;
 }
 
 function resolveInside(baseDir, ...parts) {
@@ -240,6 +247,7 @@ async function buildSubmissionContext(notes, options = {}) {
   const submittedAt = options.submittedAt || new Date().toISOString();
   const ledger = await loadSessionLedger();
   const session = ledger.sessions[sessionId] || { chunks: {}, annotations: {} };
+  ledger.sessions[sessionId] = session;
   session.chunks ||= {};
   session.annotations ||= {};
 
@@ -307,31 +315,34 @@ async function buildSubmissionContext(notes, options = {}) {
     };
   }
 
-  ledger.sessions[sessionId] = session;
-  if (notes.length > 0) await saveSessionLedger(ledger);
-
   return {
     sessionId,
     contextMode,
     chunks,
     omittedChunks,
     noteCount: notes.length,
+    ledger,
   };
 }
 
 export async function markRead(bookId, chunkId) {
-  await loadManifest(bookId);
-  const progress = await loadProgress();
-  const current = progress[bookId] || {};
-  const readIds = new Set(current.readChunkIds || []);
-  readIds.add(chunkId);
-  progress[bookId] = {
-    lastChunkId: chunkId,
-    lastReadAt: new Date().toISOString(),
-    readChunkIds: Array.from(readIds),
-  };
-  await writeJson(progressPath, progress);
-  return progress[bookId];
+  return withWriteLock(async () => {
+    const manifest = await loadManifest(bookId);
+    if (!manifest.chunks.some((chunk) => chunk.id === chunkId)) {
+      throw new Error(`Unknown chunkId for ${bookId}: ${chunkId}`);
+    }
+    const progress = await loadProgress();
+    const current = progress[bookId] || {};
+    const readIds = new Set(current.readChunkIds || []);
+    readIds.add(chunkId);
+    progress[bookId] = {
+      lastChunkId: chunkId,
+      lastReadAt: new Date().toISOString(),
+      readChunkIds: Array.from(readIds),
+    };
+    await writeJson(progressPath, progress);
+    return progress[bookId];
+  });
 }
 
 async function readAllAnnotations() {
@@ -368,37 +379,39 @@ export async function listAnnotations({ bookId, chunkId, kind, author, status, p
 }
 
 export async function annotatePassage(input) {
-  const { bookId, chunkId, quote, note } = input;
-  if (!bookId) throw new Error("bookId is required");
-  if (!chunkId) throw new Error("chunkId is required");
-  if (!quote) throw new Error("quote is required");
-  if (!note) throw new Error("note is required");
+  return withWriteLock(async () => {
+    const { bookId, chunkId, quote, note } = input;
+    if (!bookId) throw new Error("bookId is required");
+    if (!chunkId) throw new Error("chunkId is required");
+    if (!quote) throw new Error("quote is required");
+    if (!note) throw new Error("note is required");
 
-  const chunk = await readChunk(bookId, chunkId);
-  const quoteOffset = chunk.text.indexOf(quote);
-  const author = input.author || "claude";
-  const annotation = {
-    id: `ann_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
-    bookId,
-    chunkId,
-    quote,
-    note,
-    author,
-    kind: input.kind || "annotation",
-    mood: input.mood || null,
-    tags: Array.isArray(input.tags) ? input.tags : [],
-    status: input.status || (author === "user" ? "open" : "published"),
-    parentId: input.parentId || null,
-    quoteOffset: quoteOffset >= 0 ? quoteOffset : null,
-    prevId: chunk.prevId,
-    nextId: chunk.nextId,
-    createdAt: new Date().toISOString(),
-  };
+    const chunk = await readChunk(bookId, chunkId);
+    const quoteOffset = chunk.text.indexOf(quote);
+    const author = input.author || "claude";
+    const annotation = {
+      id: `ann_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+      bookId,
+      chunkId,
+      quote,
+      note,
+      author,
+      kind: input.kind || "annotation",
+      mood: input.mood || null,
+      tags: Array.isArray(input.tags) ? input.tags : [],
+      status: input.status || (author === "user" ? "open" : "published"),
+      parentId: input.parentId || null,
+      quoteOffset: quoteOffset >= 0 ? quoteOffset : null,
+      prevId: chunk.prevId,
+      nextId: chunk.nextId,
+      createdAt: new Date().toISOString(),
+    };
 
-  await mkdir(dataDir, { recursive: true });
-  await appendFile(annotationsPath, `${JSON.stringify(annotation)}\n`, "utf8");
-  invalidateAnnotationCache();
-  return annotation;
+    await mkdir(dataDir, { recursive: true });
+    await appendFile(annotationsPath, `${JSON.stringify(annotation)}\n`, "utf8");
+    invalidateAnnotationCache();
+    return annotation;
+  });
 }
 
 export async function submitUserNotes({
@@ -409,48 +422,59 @@ export async function submitUserNotes({
   includeContext = true,
   forceChunkContext = false,
 } = {}) {
-  const annotations = await readAllAnnotations();
-  const submittedAt = new Date().toISOString();
-  const submitted = [];
-  const updated = annotations.map((annotation) => {
-    const status = annotation.status || "published";
-    const shouldSubmit =
-      annotation.author === "user" &&
-      status === "open" &&
-      (!bookId || annotation.bookId === bookId) &&
-      (!chunkId || annotation.chunkId === chunkId);
+  return withWriteLock(async () => {
+    const annotations = await readAllAnnotations();
+    const submittedAt = new Date().toISOString();
+    const submitted = [];
+    const updated = annotations.map((annotation) => {
+      const status = annotation.status || "published";
+      const shouldSubmit =
+        annotation.author === "user" &&
+        status === "open" &&
+        (!bookId || annotation.bookId === bookId) &&
+        (!chunkId || annotation.chunkId === chunkId);
 
-    if (!shouldSubmit) return annotation;
+      if (!shouldSubmit) return annotation;
 
-    const next = { ...annotation, status: "submitted", submittedAt };
-    submitted.push(next);
-    return next;
+      const next = { ...annotation, status: "submitted", submittedAt };
+      submitted.push(next);
+      return next;
+    });
+
+    const context = await buildSubmissionContext(submitted, {
+      sessionId,
+      contextMode,
+      includeContext,
+      forceChunkContext,
+      submittedAt,
+    });
+    const ledger = context.ledger;
+    delete context.ledger;
+
+    if (submitted.length > 0) {
+      await writeJsonl(annotationsPath, updated);
+      invalidateAnnotationCache();
+      try {
+        await saveSessionLedger(ledger);
+      } catch (error) {
+        await writeJsonl(annotationsPath, annotations);
+        invalidateAnnotationCache();
+        throw error;
+      }
+    }
+
+    return {
+      submittedAt,
+      sessionId,
+      count: submitted.length,
+      notes: submitted,
+      context,
+      message:
+        submitted.length === 0
+          ? "No open user notes to submit."
+          : "Submitted user notes have been marked submitted. Chunk text is included once per session by default.",
+    };
   });
-
-  if (submitted.length > 0) {
-    await writeJsonl(annotationsPath, updated);
-    invalidateAnnotationCache();
-  }
-
-  const context = await buildSubmissionContext(submitted, {
-    sessionId,
-    contextMode,
-    includeContext,
-    forceChunkContext,
-    submittedAt,
-  });
-
-  return {
-    submittedAt,
-    sessionId,
-    count: submitted.length,
-    notes: submitted,
-    context,
-    message:
-      submitted.length === 0
-        ? "No open user notes to submit."
-        : "Submitted user notes have been marked submitted. Chunk text is included once per session by default.",
-  };
 }
 
 export async function replyToAnnotation(input) {
