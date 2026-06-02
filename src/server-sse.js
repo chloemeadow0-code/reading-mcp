@@ -164,7 +164,13 @@ async function route(req, res) {
 
     try {
       const response = await handle(message);
-      sendMcpJson(res, 200, response || { accepted: true });
+      // Per MCP Streamable HTTP spec: notifications get 202 Accepted with empty body
+      // Requests (with id) get the JSON-RPC response
+      if (response === null || isJsonRpcNotification(message)) {
+        sendMcpAccepted(res);
+      } else {
+        sendMcpJson(res, 200, response);
+      }
     } catch (error) {
       sendMcpJson(res, 200, rpcError(message?.id ?? null, -32000, error.message || String(error)));
     }
