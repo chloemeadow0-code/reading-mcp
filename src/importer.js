@@ -149,64 +149,224 @@ async function prepareTarget(options) {
   await rm(target, { recursive: true, force: true });
 }
 
-function importerArgs(filePath, options) {
-  const script = options.format === "epub" ? "scripts/import_epub.py" : "scripts/import_text.py";
-  const args = [path.join(ROOT, script), filePath, "--out", booksDir];
+// ─── Pure JS text import (replaces scripts/import_text.py) ─────────
 
-  if (options.format === "txt") {
-    args.push("--title", options.title || titleFromFilename(options.filename));
-  } else {
-    args.push("--title", options.title || titleFromFilename(options.filename));
-  }
-
-  if (options.author) args.push("--author", options.author);
-  if (options.bookId) args.push("--book-id", options.bookId);
-  if (options.maxChars) args.push("--max-chars", String(options.maxChars));
-  if (options.format === "txt" && options.headingRegex) {
-    args.push("--heading-regex", options.headingRegex);
-    if (options.minSectionChars) args.push("--min-section-chars", String(options.minSectionChars));
-  }
-
-  return args;
+function slugify(value) {
+  let s = value.trim().toLowerCase();
+  s = s.replace(/[^\w\u4e00-\u9fff]+/gu, "-");
+  s = s.replace(/-+/g, "-").replace(/^-|-$/g, "");
+  return s || "book";
 }
 
-async function readImportedManifest(stdout) {
-  const importedPath = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .at(-1);
-  if (!importedPath) throw new Error("Import script did not report an output directory");
+function countWords(text) {
+  const words = text.match(/[A-Za-z0-9_]+|[\u4e00-\u9fff]/g);
+  return words ? words.length : 0;
+}
 
-  const bookDir = path.resolve(ROOT, importedPath);
-  const relative = path.relative(path.resolve(booksDir), bookDir);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Import script returned a directory outside data/books");
+function isSemanticBreak(prev, current) {
+  const breakMarkers = new Set(["***", "---", "* * *", "\u25C6", "\u25A0", "\u25CF", "\u25CB", "\u2606"]);
+  if (breakMarkers.has(prev.trim()) || breakMarkers.has(current.trim())) return true;
+  if (prev.trim().length < 20 && /^\d+$/.test(prev.trim())) return true;
+  return /[。.]"?\s*$|[？?]"?\s*$|[！!]"?\s*$/.test(prev);
+}
+
+function splitText(text, maxChars) {
+  const paragraphs = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  if (!paragraphs.length) return [text.trim()];
+  if (paragraphs.reduce((sum, p) => sum + p.length + 2, 0) <= maxChars) {
+    return [paragraphs.join("\n\n")];
   }
 
+  const chunks = [];
+  let start = 0;
+
+  while (start < paragraphs.length) {
+    let currentLen = 0;
+    let end = start;
+
+    while (end < paragraphs.length) {
+      const pLen = paragraphs[end].length + 2;
+      if (currentLen + pLen > maxChars && end > start) break;
+      currentLen += pLen;
+      end++;
+    }
+
+    if (end >= paragraphs.length) {
+      chunks.push(paragraphs.slice(start).join("\n\n"));
+      break;
+    }
+
+    const searchStart = Math.max(start + 1, end - 5);
+    const searchEnd = Math.min(paragraphs.length, end + 3);
+    let bestCut = end;
+    for (let i = searchEnd - 1; i >= searchStart; i--) {
+      if (isSemanticBreak(paragraphs[i - 1], paragraphs[i])) {
+        bestCut = i;
+        break;
+      }
+    }
+
+    chunks.push(paragraphs.slice(start, bestCut).join("\n\n"));
+    start = bestCut;
+  }
+
+  return chunks.length ? chunks : [text.trim()];
+}
+
+function sectionsFromHeadingRegex(text, headingRegex, minSectionChars = 1) {
+  const pattern = new RegExp(headingRegex, "gm");
+  const matches = [...text.matchAll(pattern)];
+  if (!matches.length) return [];
+
+  const sections = [];
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    const sectionText = text.slice(start, end).trim();
+    const title = matches[i][1]?.trim() || matches[i][0].trim();
+    if (sectionText && sectionText.length >= minSectionChars) {
+      sections.push({ title, text: sectionText });
+    }
+  }
+  return sections;
+}
+
+function chunkId(index) {
+  return `ch${String(index).padStart(2, "0")}`;
+}
+
+async function writeBookSections(sections, title, author, bookId, maxChars, source = null) {
+  const resolvedBookId = bookId || slugify(title);
+  const bookDir = path.join(booksDir, resolvedBookId);
+  const chunksDir = path.join(bookDir, "chunks");
+  await mkdir(chunksDir, { recursive: true });
+
+  const plannedChunks = [];
+  for (let si = 0; si < sections.length; si++) {
+    const sectionTitle = sections[si].title || `Section ${si + 1}`;
+    const sectionText = sections[si].text || "";
+    const sectionChunks = splitText(sectionText, maxChars);
+    for (let pi = 0; pi < sectionChunks.length; pi++) {
+      const partCount = sectionChunks.length;
+      const displayTitle = partCount === 1 ? sectionTitle : `${sectionTitle} Part ${pi + 1}/${partCount}`;
+      plannedChunks.push({
+        text: sectionChunks[pi],
+        title: displayTitle,
+        sectionTitle,
+        sectionIndex: si,
+        sectionPart: pi + 1,
+        sectionPartCount: partCount,
+        sourcePath: sections[si].sourcePath || null,
+      });
+    }
+  }
+
+  const manifestChunks = [];
+  for (let i = 0; i < plannedChunks.length; i++) {
+    const cid = chunkId(i);
+    const chunkText = plannedChunks[i].text;
+    const chunkPath = path.join(chunksDir, `${cid}.txt`);
+    await writeFile(chunkPath, `# ${plannedChunks[i].title}\n\n${chunkText.trim()}\n`, "utf8");
+    manifestChunks.push({
+      id: cid,
+      title: plannedChunks[i].title,
+      sectionTitle: plannedChunks[i].sectionTitle,
+      sectionIndex: plannedChunks[i].sectionIndex,
+      sectionPart: plannedChunks[i].sectionPart,
+      sectionPartCount: plannedChunks[i].sectionPartCount,
+      sourcePath: plannedChunks[i].sourcePath,
+      order: i,
+      path: `chunks/${cid}.txt`,
+      charCount: chunkText.length,
+      wordCount: countWords(chunkText),
+      prevId: i > 0 ? chunkId(i - 1) : null,
+      nextId: i < plannedChunks.length - 1 ? chunkId(i + 1) : null,
+    });
+  }
+
+  const manifest = {
+    bookId: resolvedBookId,
+    title,
+    author: author || null,
+    language: null,
+    createdAt: new Date().toISOString(),
+    source: source || { type: "text" },
+    chunks: manifestChunks,
+  };
+  await writeFile(path.join(bookDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  return bookDir;
+}
+
+async function importText(buffer, options) {
+  const text = buffer.toString("utf-8");
+  const title = options.title || titleFromFilename(options.filename);
+  let sections;
+
+  if (options.headingRegex) {
+    sections = sectionsFromHeadingRegex(text, options.headingRegex, options.minSectionChars || 1);
+  }
+
+  if (sections && sections.length) {
+    await writeBookSections(sections, title, options.author, options.bookId, options.maxChars || 6000, {
+      type: "text",
+      headingRegex: options.headingRegex,
+      minSectionChars: options.minSectionChars || 1,
+    });
+  } else {
+    await writeBookSections(
+      [{ title, text, sourcePath: null }],
+      title,
+      options.author,
+      options.bookId,
+      options.maxChars || 6000,
+      { type: "text" },
+    );
+  }
+
+  const bookDir = path.join(booksDir, options.bookId || slugify(title));
   return JSON.parse(await readFile(path.join(bookDir, "manifest.json"), "utf8"));
+}
+
+async function importEpubFromBuffer(buffer, options) {
+  const { title: epubTitle, author: epubAuthor, sections, fileName } = await readEpub(buffer, options.filename);
+  const finalTitle = options.title || cleanMetadataTitle(epubTitle, titleFromFilename(options.filename));
+  const finalAuthor = options.author || cleanMetadataAuthor(epubAuthor, finalTitle);
+
+  if (!sections.length) throw new Error("No readable text found in EPUB");
+
+  await writeBookSections(sections, finalTitle, finalAuthor, options.bookId, options.maxChars || 6000, {
+    type: "epub",
+    fileName,
+  });
+
+  const bookDir = path.join(booksDir, options.bookId || slugify(finalTitle));
+  return JSON.parse(await readFile(path.join(bookDir, "manifest.json"), "utf8"));
+}
+
+function cleanMetadataTitle(value, fallback) {
+  const t = (value || "").trim();
+  if (!t || /^(unknown|untitled|administrator)$/i.test(t) || t.length <= 1) return fallback;
+  return t;
+}
+
+function cleanMetadataAuthor(value, title) {
+  const a = (value || "").trim();
+  if (!a || /^(unknown|administrator)$/i.test(a) || a === title) return null;
+  return a;
 }
 
 async function runImport(filePath, options) {
   await prepareTarget(options);
-  const args = importerArgs(filePath, options);
-  let stdout = "";
-  let stderr = "";
-  try {
-    const result = await execFileAsync("python3", args, {
-      cwd: ROOT,
-      maxBuffer: maxImportOutputBytes,
-      timeout: 60_000,
-    });
-    stdout = result.stdout || "";
-    stderr = result.stderr || "";
-  } catch (error) {
-    const message = [error.message, error.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(message || "Import script failed");
+
+  const buffer = await readFile(filePath);
+  let manifest;
+
+  if (options.format === "epub") {
+    manifest = await importEpubFromBuffer(buffer, options);
+  } else {
+    manifest = await importText(buffer, options);
   }
 
-  if (stderr.trim()) process.stderr.write(stderr);
-  const manifest = await readImportedManifest(stdout);
   const firstChunk = manifest.chunks?.[0] || null;
   const lastChunk = manifest.chunks?.[manifest.chunks.length - 1] || null;
   return {
