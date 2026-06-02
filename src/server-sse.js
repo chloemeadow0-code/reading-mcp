@@ -241,7 +241,13 @@ async function route(req, res) {
       return;
     }
 
-    sendJson(res, 202, { accepted: true });
+    // Per MCP spec: notifications get 202 Accepted with empty body
+    if (isJsonRpcNotification(message)) {
+      res.writeHead(202, { "content-type": "application/json; charset=utf-8" });
+      res.end();
+    } else {
+      sendJson(res, 202, { accepted: true });
+    }
 
     try {
       const response = await handle(message);
