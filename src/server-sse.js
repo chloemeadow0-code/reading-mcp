@@ -89,6 +89,18 @@ function sendMcpJson(res, status, value) {
   res.end(JSON.stringify(value, null, 2));
 }
 
+function sendMcpAccepted(res) {
+  res.writeHead(202, {
+    "content-type": "application/json; charset=utf-8",
+    "mcp-protocol-version": protocolVersion,
+  });
+  res.end();
+}
+
+function isJsonRpcNotification(message) {
+  return message && message.jsonrpc === "2.0" && (message.id === undefined || message.id === null);
+}
+
 function sendUnauthorized(req, res) {
   const metadataUrl = `${externalBaseUrl(req)}/.well-known/oauth-protected-resource/mcp`;
   res.writeHead(401, {
