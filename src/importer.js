@@ -1,19 +1,16 @@
 import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dataDir } from "./store.js";
+import { readEpub } from "./import-epub.js";
 
-const execFileAsync = promisify(execFile);
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const booksDir = path.join(dataDir, "books");
 const uploadsDir = path.join(dataDir, "uploads");
 const maxImportBytes = Number(process.env.READING_IMPORT_MAX_BYTES || 25_000_000);
-const maxImportOutputBytes = Number(process.env.READING_IMPORT_MAX_OUTPUT_BYTES || 10_000_000);
 const uploadSessions = new Map();
 let importQueue = Promise.resolve();
 const STALE_UPLOAD_MS = 60 * 60 * 1000; // 1 hour
